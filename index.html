@@ -75,7 +75,7 @@ td:last-child{white-space:normal;min-width:180px;color:var(--mute)}tbody tr[data
   <div class="fine">Leave blank to use the free public server, which is rate limited. Your own OSRM servers have no limit. Use https:// URLs.</div>
  </details>
  <div id="status"></div>
- <div class="fine">Venues come from OpenStreetMap (comprehensive filter including bars, pubs, craft breweries, biergartens, and venues tagged with bar=yes). The algorithm always drives to the first bar, routes back to your parked car for driving legs, dynamically schedules around opening hours, and routes via OSRM.</div>
+ <div class="fine">Venues come from OpenStreetMap (comprehensive filter including bars, pubs, craft breweries, biergartens, and venues tagged with bar=yes). Map lines now render exact street-level and footpath geometries fetched live via OSRM routing.</div>
 </div>
 
 <div class="p"><div id="map"></div></div>
@@ -216,7 +216,6 @@ function parseOH(s){
   return any?days:null;
 }
 
-// Expanded Overpass Queries to catch breweries, taprooms, biergartens, and bars/pubs
 const stateQ = c => `[out:json][timeout:180];area["ISO3166-2"="US-${c}"]->.a;(nwr["amenity"~"^(bar|pub|biergarten|nightclub)$"](area.a);nwr["craft"="brewery"](area.a);nwr["bar"="yes"](area.a););out center tags;`;
 const radiusQ = (m, lat, lon) => `[out:json][timeout:90];(nwr["amenity"~"^(bar|pub|biergarten|nightclub)$"](around:${m},${lat},${lon});nwr["craft"="brewery"](around:${m},${lat},${lon});nwr["bar"="yes"](around:${m},${lat},${lon}););out center tags;`;
 
@@ -252,20 +251,28 @@ async function getVenues(){
 
 const DEFAULT_PUB={car:"https://routing.openstreetmap.de/routed-car",walk:"https://routing.openstreetmap.de/routed-foot"};
 const own=m=>($(m==="walk"?"rfoot":"rcar").value||"").trim();
-const routerUrl=m=>(own(m)||DEFAULT_PUB[m]).replace(/\/+$/,"")+"/route/v1/driving/";
+const routerUrl=m=>(own(m)||DEFAULT_PUB[m]).replace(/\/+$/,"")+"/route/v1/";
 
 const rcache=new Map(),sleep=ms=>new Promise(r=>setTimeout(r,ms));let lastReq=0;
-async function osrm(mode,pts){
+
+// Fetch full GeoJSON route geometry from OSRM for actual street drawing
+async function fetchLegGeometry(mode, p1, p2){
+  const profile = mode === 'walk' ? 'foot' : 'driving';
   for(let a=0;a<3;a++){
-    const w=lastReq+(own(mode)?40:900)-Date.now();if(w>0)await sleep(w);lastReq=Date.now();
+    const w = lastReq + 200 - Date.now(); if(w > 0) await sleep(w); lastReq = Date.now();
     try{
-      const r=await fetch(routerUrl(mode)+pts.map(p=>p.lon.toFixed(5)+","+p.lat.toFixed(5)).join(";")+"?overview=false&steps=false");
-      if(r.status===429||r.status>=500){await sleep(2500*(a+1));continue;}
-      const j=await r.json();
-      return j.code==="Ok"?j.routes[0].legs.map(l=>({mi:l.distance/1609.34,min:l.duration/60})):null;
-    }catch(e){await sleep(1500*(a+1));}
+      const url = `${routerUrl(profile)}/${p1.lon},${p1.lat};${p2.lon},${p2.lat}?overview=full&geometries=geojson`;
+      const res = await fetch(url);
+      if(!res.ok) continue;
+      const j = await res.json();
+      if(j.code === "Ok" && j.routes && j.routes.length > 0){
+        // OSRM returns coordinates as [lon, lat], Leaflet needs [lat, lon]
+        return j.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
+      }
+    }catch(e){}
   }
-  return undefined;
+  // Fallback straight line if OSRM fails
+  return [[p1.lat, p1.lon], [p2.lat, p2.lon]];
 }
 
 async function planRoute(pubs, startPt, openTime) {
@@ -360,22 +367,21 @@ async function run(){
     const ref=startPt||{lat:list.reduce((s,v)=>s+v.lat,0)/list.length,lon:list.reduce((s,v)=>s+v.lon,0)/list.length};
     let use=list;
     if(list.length>maxn){use=[...list].sort((a,b)=>D(ref,a)-D(ref,b)).slice(0,maxn);}
-    $("status").textContent=`Found ${found.toLocaleString()} bars, pubs & breweries; planning ${use.length.toLocaleString()} venues...`;
+    $("status").textContent=`Found ${found.toLocaleString()} venues; planning route across ${use.length.toLocaleString()} stops...`;
     await new Promise(r=>setTimeout(r,20));
     
     const openTime = toMins($("start").value || "16:00");
     const itinerary = await planRoute(use, startPt, openTime);
     
-    simulateItinerary(itinerary, startPt, openTime);
+    await simulateAndDraw(itinerary, startPt, openTime);
   }catch(e){$("status").classList.add("err");$("status").textContent=e.message;}
   btn.disabled=false;
 }
 
-function simulateItinerary(itinerary, startPt, openTime){
+async function simulateAndDraw(itinerary, startPt, openTime){
   const weightKg = (parseFloat($("weight").value) || 180) * 0.453592;
   const r = $("gender").value === "Male" ? 0.68 : 0.55;
   const bump = (parseFloat($("grams").value) || 14) * (parseFloat($("dps").value) || 1) / (weightKg * 1000 * r) * 100;
-  const dlim = parseFloat($("dlim").value) || 0;
   const cap = parseFloat($("cap").value) || 0;
 
   let now = openTime, bac = 0, miles = 0, stops = 0, nights = 0;
@@ -389,12 +395,17 @@ function simulateItinerary(itinerary, startPt, openTime){
   let parkedCarPos = startPt ? {lat: startPt.lat, lon: startPt.lon} : null;
   let currentPos = startPt ? {lat: startPt.lat, lon: startPt.lon} : null;
 
-  itinerary.forEach((item, idx) => {
+  let allGeoPoints = [];
+
+  for(let idx=0; idx<itinerary.length; idx++){
+    const item = itinerary[idx];
     const pub = item.to;
     const notes = [];
     let modeStr = "";
     let travelMins = 0;
     let dist = currentPos ? D(currentPos, pub) * CIRC : 0;
+
+    let legStartPos = currentPos ? {...currentPos} : {lat: pub.lat, lon: pub.lon};
 
     if (idx === 0 && !startPt) {
       modeStr = "Drive to 1st pub & park";
@@ -427,6 +438,11 @@ function simulateItinerary(itinerary, startPt, openTime){
         currentPos = {lat: pub.lat, lon: pub.lon};
       }
     }
+
+    // Fetch actual street-level geometry for the map line
+    $("status").textContent = `Routing street geometry for stop ${idx+1} of ${itinerary.length}...`;
+    const streetGeo = await fetchLegGeometry(item.mode, legStartPos, pub);
+    allGeoPoints.push(streetGeo);
 
     now += travelMins;
     tot.travel += travelMins;
@@ -468,7 +484,7 @@ function simulateItinerary(itinerary, startPt, openTime){
     labels.push(String(stops));
     series.push(+bac.toFixed(4));
     info.push({pub, arrive: arriveTime, bac, cls, hrs, src: pub.src});
-  });
+  }
 
   const total = now - openTime, soberAt = now + bac / ELIM * 60;
   const kp = (v, l) => `<div class="k"><b>${v}</b><span>${l}</span></div>`;
@@ -476,8 +492,9 @@ function simulateItinerary(itinerary, startPt, openTime){
     + kp(dur(tot.travel), "Travelling") + kp(dur(tot.dwell), "At venues") + kp(dur(tot.rest), "Rest") + kp(dur(tot.closed), `Closed/wait (${nights} night${nights === 1 ? "" : "s"})`);
   $("sub").textContent = `Back to 0.000% around ${clock(soberAt)}.`;
   ROWS = rows; showRows(300);
-  $("status").textContent = `Route planned successfully across ${stops} stops.`;
-  drawMap(itinerary.map(i => i.to), info, !!startPt);
+  $("status").textContent = `Route planned successfully across ${stops} stops with street-level routing!`;
+  
+  drawMap(allGeoPoints, itinerary.map(i => i.to), info, !!startPt);
 
   if (chart) chart.destroy();
   chart = new Chart($("chart"), {
@@ -501,19 +518,31 @@ function simulateItinerary(itinerary, startPt, openTime){
 }
 
 const COLORS={safe:"#2dd4bf",warn:"#f59e0b",danger:"#f87171"};
-function drawMap(path,info,hasStart){
-  layer.clearLayers();markers=[];INFO=info;
+function drawMap(geoSegments, path, info, hasStart){
+  layer.clearLayers(); markers=[]; INFO=info;
   const canvas=L.canvas({padding:.5});
-  const pts=path.map(p=>[p.lat,p.lon]);
-  L.polyline(pts,{color:"#2dd4bf",weight:1.5,opacity:.55,renderer:canvas}).addTo(layer);
+  
+  // Draw each street-level route segment onto the map
+  geoSegments.forEach(seg => {
+    L.polyline(seg, {color:"#2dd4bf", weight:2.5, opacity:0.75, renderer:canvas}).addTo(layer);
+  });
+
   info.forEach((s,i)=>{
     const m=L.circleMarker([s.pub.lat,s.pub.lon],{radius:5,color:"#0b1220",weight:1,fillColor:COLORS[s.cls],fillOpacity:.95,renderer:canvas})
       .bindTooltip(`${i+1}. ${esc(s.pub.name)}<br>${clock(s.arrive)} · ${s.bac.toFixed(3)}%<br>Hours: ${esc(s.hrs)} (${s.src})`).addTo(layer);
     markers[i]=m;
   });
-  if(hasStart)L.circleMarker(pts[0],{radius:9,color:"#fff",weight:2,fillColor:"#6366f1",fillOpacity:1,renderer:canvas}).bindTooltip("Start/Car").addTo(layer);
-  map.fitBounds(L.latLngBounds(pts).pad(.1));
+
+  if(hasStart && path.length > 0) {
+    L.circleMarker([path[0].lat, path[0].lon],{radius:9,color:"#fff",weight:2,fillColor:"#6366f1",fillOpacity:1,renderer:canvas}).bindTooltip("Start/Car").addTo(layer);
+  }
+  
+  const allCoords = geoSegments.flat();
+  if(allCoords.length > 0) {
+    map.fitBounds(L.latLngBounds(allCoords).pad(.1));
+  }
 }
+
 $("log").addEventListener("click",e=>{
   const tr=e.target.closest("tr[data-i]");if(!tr)return;
   const i=+tr.dataset.i,m=markers[i],s=INFO[i];
