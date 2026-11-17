@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Continental Pub Crawl &amp; BAC Optimizer</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{--bg:#0b1220;--card:#111a2e;--line:#22304d;--ink:#e2e8f0;--mute:#8b9bb8;--in:#2dd4bf;--out:#f59e0b;--warn:#f87171}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,sans-serif;padding:12px 12px 40px}
+main{max-width:1100px;margin:auto}h1{font-size:1.3rem;margin:6px 0}
+.p{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:12px}
+.r{display:flex;flex-wrap:wrap;gap:8px;align-items:end}
+label{display:flex;flex-direction:column;font-size:.75rem;color:var(--mute);gap:2px}
+input,select,button{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 9px;min-height:36px}
+button{cursor:pointer}button.pri{background:var(--in);color:#04201c;border-color:var(--in);font-weight:600}button:disabled{opacity:.5;cursor:wait}
+:focus-visible{outline:2px solid var(--in);outline-offset:2px}
+.tw{overflow:auto;max-height:520px}table{border-collapse:collapse;width:100%;font-size:.8rem;white-space:nowrap}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right}th{position:sticky;top:0;background:var(--card);z-index:1}
+th:nth-child(-n+3),td:nth-child(-n+3),th:nth-child(n+6),td:nth-child(n+6){text-align:left}
+td:last-child{white-space:normal;min-width:180px;color:var(--mute)}tbody tr[data-i]{cursor:pointer}tbody tr[data-i]:hover{background:#16233d}
+.safe{color:var(--in)}.warn{color:var(--out)}.danger{color:var(--warn)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:10px}
+.k{border:1px solid var(--line);border-radius:6px;padding:8px}.k b{display:block;font-size:1.05rem}.k span{font-size:.72rem;color:var(--mute)}
+#sub,#status{font-size:.8rem;color:var(--mute);margin-bottom:8px}#status{margin:8px 0 0}
+#geo{font-size:.78rem;color:var(--mute);margin-top:6px}.err{color:var(--warn)!important}
+.fine{font-size:.72rem;color:var(--mute);margin-top:8px}
+.cv{position:relative;height:240px}
+#map{height:440px;border-radius:6px;background:#0b1220}
+.leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.92) contrast(.9)}
+.hide{display:none}
+</style>
+</head>
+<body>
+<main>
+<h1>Continental Pub Crawl &amp; BAC Optimizer</h1>
+
+<div class="p">
+ <div class="r">
+  <label style="flex:1 1 280px">Start address<input id="addr" type="text" placeholder="e.g. 1 W Bay St, Savannah, GA (or lat, lon)"></label>
+  <button id="find" type="button">Find</button>
+  <button id="here" type="button">Use my location</button>
+ </div>
+ <div id="geo">Leave blank to start at the first venue found.</div>
+</div>
+
+<div class="p">
+ <div class="r">
+  <label>Venues from<select id="mode">
+    <option value="radius">Radius around start (live OSM)</option>
+    <option value="state">One state (prebuilt data)</option>
+    <option value="national">Nationwide (prebuilt data)</option>
+  </select></label>
+  <label id="wRadius">Radius (mi)<select id="radius"><option>1</option><option>2</option><option selected>5</option><option>10</option><option>25</option></select></label>
+  <label id="wState" class="hide">State<select id="state"></select></label>
+  <label>Max venues<input id="maxn" type="number" value="1000" min="2" max="250000" step="1000" style="width:90px"></label>
+  <label>Start date<input id="sdate" type="date"></label>
+  <label>Sex<select id="gender"><option>Male</option><option>Female</option></select></label>
+  <label>Weight (lbs)<input id="weight" type="number" value="180" min="60" max="500" style="width:80px"></label>
+  <label>Grams per drink<input id="grams" type="number" value="14" min="1" step="0.5" style="width:80px"></label>
+  <label>Drinks per stop<input id="dps" type="number" value="1" min="0.5" step="0.5" style="width:80px"></label>
+  <label>Day starts<input id="start" type="time" value="16:00"></label>
+  <label>Default last call<input id="close" type="time" value="02:00"></label>
+  <label>Pause to stay under BAC<input id="cap" type="number" value="0.08" min="0" step="0.01" style="width:90px"></label>
+  <button id="run" class="pri" type="button">Plan route</button>
+ </div>
+ <div id="status"></div>
+ <div class="fine">Venues come from OpenStreetMap (amenity = bar or pub): live for the radius mode, or from the prebuilt data/ files for state and nationwide. If more are found than Max venues, the ones nearest your start are kept. Hours come from each venue's OSM opening_hours when they can be parsed; otherwise the default window and last call are assumed, and the Source column says which. The plan visits all of them: it waits overnight when venues are closed, and rests when the next drink would pass your BAC limit (0 turns the limit off). Rides over 2 hours add a 20-minute driver break per 2 hours.</div>
+</div>
+
+<div class="p"><div id="map"></div></div>
+
+<div class="p">
+ <div class="kpis" id="kpis"></div>
+ <div id="sub">Pick a venue source and select Plan route.</div>
+ <div class="tw">
+  <table>
+   <thead><tr><th>Stop</th><th>Venue</th><th>Getting there</th><th>Arrive</th><th>BAC</th><th>Hours</th><th>Source</th><th>Rest / wait</th></tr></thead>
+   <tbody id="log"><tr><td colspan="8" style="text-align:center;color:var(--mute)">No route yet</td></tr></tbody>
+  </table>
+ </div>
+ <button id="more" class="hide" type="button" style="margin-top:8px">Show more rows</button>
+</div>
+<div class="p"><div class="cv"><canvas id="chart"></canvas></div></div>
+<p class="fine">Widmark estimates only. Real BAC varies with food, hydration, body composition and drink strength, so never use this to decide whether you can drive. Rides over 1 mile are modeled as rideshare or designated driver, never self-driving. Distances are straight-line × 1.2 as a road estimate. Map data © OpenStreetMap contributors; geocoding by Nominatim, venues via Overpass. OSM coverage is good but not complete.</p>
+</main>
+
+<script>
+const STATES="AL:Alabama,AZ:Arizona,AR:Arkansas,CA:California,CO:Colorado,CT:Connecticut,DE:Delaware,DC:District of Columbia,FL:Florida,GA:Georgia,ID:Idaho,IL:Illinois,IN:Indiana,IA:Iowa,KS:Kansas,KY:Kentucky,LA:Louisiana,ME:Maine,MD:Maryland,MA:Massachusetts,MI:Michigan,MN:Minnesota,MS:Mississippi,MO:Missouri,MT:Montana,NE:Nebraska,NV:Nevada,NH:New Hampshire,NJ:New Jersey,NM:New Mexico,NY:New York,NC:North Carolina,ND:North Dakota,OH:Ohio,OK:Oklahoma,OR:Oregon,PA:Pennsylvania,RI:Rhode Island,SC:South Carolina,SD:South Dakota,TN:Tennessee,TX:Texas,UT:Utah,VT:Vermont,VA:Virginia,WA:Washington,WV:West Virginia,WI:Wisconsin,WY:Wyoming".split(",").map(s=>s.split(":"));
+// Approximate last-call defaults (editable); everything else defaults to 02:00.
+const LAST_CALL={GA:"02:30",NY:"04:00"};
+const OVERPASS=["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter"];
+const DWELL=15,ELIM=0.015,CIRC=1.2,BREAK_EVERY=120,BREAK_LEN=20;
+
+const $=id=>document.getElementById(id);
+const D=(a,b)=>{const R=3958.8,t=Math.PI/180,dl=(b.lat-a.lat)*t,dn=(b.lon-a.lon)*t;
+  const x=Math.sin(dl/2)**2+Math.cos(a.lat*t)*Math.cos(b.lat*t)*Math.sin(dn/2)**2;return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));};
+const toMins=s=>{const[h,m]=s.split(":").map(Number);return h*60+m;};
+const clock=t=>{t=Math.round(t);const h=Math.floor(t/60)%24;return `D${Math.floor(t/1440)+1} ${String(h).padStart(2,"0")}:${String(t%60).padStart(2,"0")}`;};
+const dur=m=>{m=Math.round(m);if(m>=525600)return (m/525600).toFixed(1)+" yr ("+Math.round(m/1440).toLocaleString()+" days)";const d=Math.floor(m/1440),h=Math.floor(m%1440/60);return (d?d+"d ":"")+((h||d)?h+"h ":"")+(m%60)+"m";};
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let chart,startPt=null,resolvedFor="";
+const cache=new Map();
+
+// ---------- UI wiring ----------
+STATES.forEach(([c,n])=>$("state").add(new Option(n,c)));
+$("state").value="GA";$("close").value=LAST_CALL.GA;
+function syncMode(){const m=$("mode").value;
+  $("wRadius").classList.toggle("hide",m!=="radius");$("wState").classList.toggle("hide",m!=="state");}
+$("mode").onchange=syncMode;
+$("sdate").value=new Date().toLocaleDateString("en-CA");
+$("state").onchange=()=>{$("close").value=LAST_CALL[$("state").value]||"02:00";};
+$("addr").oninput=()=>{if($("addr").value!==resolvedFor)startPt=null;};
+
+// ---------- Map ----------
+const map=L.map("map",{preferCanvas:true}).setView([39.5,-98.35],4);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"© OpenStreetMap contributors"}).addTo(map);
+let layer=L.layerGroup().addTo(map),markers=[],INFO=[],ROWS=[],shown=0;
+
+// ---------- Geocoding ----------
+async function geocode(q){
+  const m=q.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
+  let p;
+  if(m)p={lat:+m[1],lon:+m[2],label:`${(+m[1]).toFixed(4)}, ${(+m[2]).toFixed(4)}`};
+  else{
+    const res=await fetch("https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=us&q="+encodeURIComponent(q));
+    if(!res.ok)throw new Error("Geocoder returned "+res.status);
+    const j=await res.json();
+    if(!j.length)throw new Error("No match for that address. Try adding the city and state.");
+    p={lat:+j[0].lat,lon:+j[0].lon,label:j[0].display_name};
+  }
+  if(p.lat<24||p.lat>50||p.lon<-125||p.lon>-66)throw new Error("That location is outside the contiguous US.");
+  return p;
+}
+async function resolve(){
+  const q=$("addr").value.trim(),g=$("geo");g.classList.remove("err");
+  if(!q){startPt=null;g.textContent="Leave blank to start at the first venue found.";return;}
+  if(startPt&&resolvedFor===q)return;
+  g.textContent="Looking up address…";
+  startPt=await geocode(q);resolvedFor=q;g.textContent="Start: "+startPt.label;
+}
+const geoErr=e=>{startPt=null;$("geo").classList.add("err");$("geo").textContent=e.message;};
+$("find").onclick=()=>resolve().catch(geoErr);
+$("here").onclick=()=>{
+  if(!navigator.geolocation)return geoErr(new Error("This browser can't share your location."));
+  navigator.geolocation.getCurrentPosition(pos=>{
+    startPt={lat:pos.coords.latitude,lon:pos.coords.longitude,label:"My location"};
+    $("addr").value=`${startPt.lat.toFixed(4)}, ${startPt.lon.toFixed(4)}`;resolvedFor=$("addr").value;
+    $("geo").classList.remove("err");$("geo").textContent="Start: my current location";
+  },()=>geoErr(new Error("Location permission was denied. Type an address instead.")));
+};
+
+// ---------- Venues from OpenStreetMap ----------
+async function overpass(q){
+  let last;
+  for(const url of OVERPASS){
+    try{
+      const res=await fetch(url,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"data="+encodeURIComponent(q)});
+      if(!res.ok)throw new Error("HTTP "+res.status);
+      return await res.json();
+    }catch(e){last=e;}
+  }
+  throw new Error("Overpass is busy or the area is too large ("+last.message+"). Try a smaller radius or try again in a minute.");
+}
+const DN=["Su","Mo","Tu","We","Th","Fr","Sa"],hm=s=>{const[h,m]=s.split(":");return +h*60+ +m;};
+const hhmm=m=>String(Math.floor(m/60)%24).padStart(2,"0")+":"+String(m%60).padStart(2,"0"),fmtWin=w=>hhmm(w[0])+"–"+hhmm(w[1]);
+// Parses day ranges with one interval per rule, "off", or 24/7. Anything fancier returns null (shown as unparsed).
+function parseOH(s){
+  s=(s||"").trim().replace(/;\s*$/,"");if(!s)return null;
+  if(s==="24/7")return Array(7).fill([0,1440]);
+  const d1="(?:Mo|Tu|We|Th|Fr|Sa|Su)",part=d1+"(?:\\s*-\\s*"+d1+")?";
+  const re=new RegExp("^(?:("+part+"(?:\\s*,\\s*"+part+")*)\\s+)?(?:(off|closed)|(\\d{1,2}:\\d\\d)\\s*-\\s*(\\d{1,2}:\\d\\d))$","i");
+  const days=Array(7).fill(null);let any=false;
+  for(const rule of s.split(";")){
+    const m=rule.trim().match(re);if(!m)return null;
+    const set=new Set();
+    if(!m[1])for(let i=0;i<7;i++)set.add(i);
+    else for(const pt of m[1].split(",")){
+      const [a,b=a]=pt.split("-").map(x=>{x=x.trim();return DN.indexOf(x[0].toUpperCase()+x[1].toLowerCase());});
+      for(let i=a;;i=(i+1)%7){set.add(i);if(i===b)break;}
+    }
+    const w=m[2]?null:[hm(m[3]),hm(m[4])];if(w&&w[1]<=w[0])w[1]+=1440;
+    set.forEach(i=>days[i]=w);any=true;
+  }
+  return any?days:null;
+}
+const stateQ=c=>`[out:json][timeout:180];area["ISO3166-2"="US-${c}"]->.a;nwr["amenity"~"^(bar|pub)$"](area.a);out center tags;`;
+async function live(key,q){
+  let d=cache.get(key);
+  if(!d){$("status").textContent="Fetching from OpenStreetMap (live)… large areas can take a minute.";d=await overpass(q);cache.set(key,d);}
+  return (d.elements||[]).flatMap(e=>{const lat=e.lat??e.center?.lat,lon=e.lon??e.center?.lon;if(lat==null||lon==null)return[];
+    const t=e.tags||{};return [[t.name||`Unnamed ${t.amenity||"bar"}`,lat,lon,t.opening_hours||""]];});
+}
+async function pool(items,n,fn){let i=0;await Promise.all(Array.from({length:n},async()=>{while(i<items.length)await fn(items[i++]);}));}
+async function getVenues(){
+  const mode=$("mode").value;let raw=[],built="";
+  if(mode==="radius"){
+    if(!startPt)throw new Error("Radius mode needs a start address. Enter one above, or use my location.");
+    const m=Math.round(+$("radius").value*1609.34);
+    raw=await live(`r:${startPt.lat.toFixed(4)},${startPt.lon.toFixed(4)}:${m}`,`[out:json][timeout:90];nwr["amenity"~"^(bar|pub)$"](around:${m},${startPt.lat},${startPt.lon});out center tags;`);
+  }else{
+    let idx=null;try{const r=await fetch("data/index.json");if(r.ok)idx=await r.json();}catch(e){}
+    if(mode==="national"&&!idx)throw new Error("Nationwide needs the prebuilt data/ folder. Run build-data.mjs (or the included GitHub Action) and publish data/ next to this page.");
+    built=idx?.built||"";
+    const codes=mode==="national"?Object.keys(idx.states):[$("state").value];let done=0;
+    await pool(codes,6,async c=>{
+      try{const r=await fetch(`data/${c}.json`);if(!r.ok)throw 0;for(const a of await r.json())raw.push([...a,c]);}
+      catch(e){if(mode==="state")(await live("s:"+c,stateQ(c))).forEach(a=>raw.push([...a,c]));}
+      $("status").textContent=`Loading data… ${++done}/${codes.length} states`;
+    });
+  }
+  const seen=new Set(),list=[];
+  for(const [name,lat,lon,oh,st] of raw){const k=`${name}|${lat.toFixed(4)},${lon.toFixed(4)}`;if(seen.has(k))continue;seen.add(k);list.push({name,lat,lon,oh,st});}
+  if(!list.length)throw new Error("No bars or pubs found there.");
+  return {list,found:list.length,built};
+}
+
+// ---------- Routing order (nearest neighbor + time-boxed 2-opt) ----------
+function order(pubs,start){
+  const all=start?[start,...pubs]:[...pubs],n=all.length;
+  const lat0=all.reduce((s,p)=>s+p.lat,0)/n,kx=69.17*Math.cos(lat0*Math.PI/180);
+  all.forEach(p=>{p.x=p.lon*kx;p.y=p.lat*69.09;});
+  const d=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+  const used=new Uint8Array(n),p=[0];used[0]=1;
+  let x0=1e9,x1=-1e9,y0=1e9,y1=-1e9;all.forEach(q=>{x0=Math.min(x0,q.x);x1=Math.max(x1,q.x);y0=Math.min(y0,q.y);y1=Math.max(y1,q.y);});
+  const S=Math.max(.5,Math.sqrt(((x1-x0)+1)*((y1-y0)+1)/n)*2),cells=new Map(),key=(i,j)=>i*100003+j;
+  all.forEach((q,i)=>{if(!i)return;q.cx=Math.floor((q.x-x0)/S);q.cy=Math.floor((q.y-y0)/S);const k=key(q.cx,q.cy);(cells.get(k)||cells.set(k,[]).get(k)).push(i);});
+  for(let s=1;s<n;s++){ // grid-accelerated nearest neighbor
+    const c=all[p[p.length-1]],ci=Math.floor((c.x-x0)/S),cj=Math.floor((c.y-y0)/S);let bi=-1,bd=Infinity;
+    for(let r=0;r<=60&&!(bi>=0&&Math.sqrt(bd)<=(r-1)*S);r++){
+      for(let i=ci-r;i<=ci+r;i++)for(let j=cj-r;j<=cj+r;j+=(Math.abs(i-ci)===r?1:2*r||1)){
+        const a=cells.get(key(i,j));if(!a)continue;
+        for(const k of a){const q=all[k],dd=(c.x-q.x)**2+(c.y-q.y)**2;if(dd<bd){bd=dd;bi=k;}}
+      }
+    }
+    if(bi<0){for(let i=1;i<n;i++){if(used[i])continue;const q=all[i],dd=(c.x-q.x)**2+(c.y-q.y)**2;if(dd<bd){bd=dd;bi=i;}}}
+    used[bi]=1;p.push(bi);const a=cells.get(key(all[bi].cx,all[bi].cy));a.splice(a.indexOf(bi),1);
+  }
+  const t0=performance.now();let imp=true;
+  while(imp&&n<=3000&&performance.now()-t0<2000){
+    imp=false;
+    for(let i=1;i<n-1;i++){
+      const a=all[p[i-1]];let b=all[p[i]],dab=d(a,b);
+      for(let j=i+1;j<n;j++){
+        const c=all[p[j]],e=j+1<n?all[p[j+1]]:null;
+        const delta=d(a,c)+(e?d(b,e):0)-dab-(e?d(c,e):0);
+        if(delta<-1e-9){
+          for(let l=i,r=j;l<r;l++,r--){const tmp=p[l];p[l]=p[r];p[r]=tmp;}
+          b=all[p[i]];dab=d(a,b);imp=true;
+        }
+      }
+      if(performance.now()-t0>2000)break;
+    }
+  }
+  return p.map(i=>all[i]);
+}
+
+// ---------- Main ----------
+async function run(){
+  const btn=$("run");btn.disabled=true;$("status").classList.remove("err");
+  try{
+    await resolve();
+    const {list,found,built}=await getVenues();
+    const maxn=Math.max(2,Math.min(250000,+$("maxn").value||1000));
+    const ref=startPt||{lat:list.reduce((s,v)=>s+v.lat,0)/list.length,lon:list.reduce((s,v)=>s+v.lon,0)/list.length};
+    let use=list;
+    if(list.length>maxn){use=[...list].sort((a,b)=>D(ref,a)-D(ref,b)).slice(0,maxn);}
+    $("status").textContent=`Found ${found.toLocaleString()} bars and pubs; planning ${use.length.toLocaleString()}${use.length<found?" nearest to the start (raise Max venues for more)":""}.${built?" Data built "+built.slice(0,10)+".":""}`;
+    await new Promise(r=>setTimeout(r,20));
+    simulate(use);
+  }catch(e){$("status").classList.add("err");$("status").textContent=e.message;}
+  btn.disabled=false;
+}
+
+function simulate(pubs){
+  const weightKg=(parseFloat($("weight").value)||180)*0.453592;
+  const r=$("gender").value==="Male"?0.68:0.55;
+  const bump=(parseFloat($("grams").value)||14)*(parseFloat($("dps").value)||1)/(weightKg*1000*r)*100;
+  const open=toMins($("start").value||"16:00");
+  let close=toMins($("close").value||"02:00");if(close<=open)close+=1440;
+  let cap=parseFloat($("cap").value)||0;
+  const capNote=cap>0&&cap<bump?`Limit ${cap} is below a single drink (${bump.toFixed(3)}%), so it was ignored.`:"";
+  if(capNote)cap=0;
+
+  const hasStart=!!startPt;
+  const path=order(pubs,hasStart?{name:startPt.label,lat:startPt.lat,lon:startPt.lon}:null);
+  let now=open,bac=0,miles=0,stops=0,nights=0;
+  const tot={travel:0,dwell:0,rest:0,closed:0};
+  const adv=(to,cat)=>{const dt=to-now;if(dt>0){bac=Math.max(0,bac-ELIM*dt/60);tot[cat]+=dt;now=to;}};
+  const dow0=new Date(($("sdate").value||new Date().toLocaleDateString("en-CA"))+"T12:00").getDay(),scope=$("mode").value,cnt={osm:0,raw:0,asm:0};
+  const hoursOf=v=>{ // OSM hours when parseable, else an assumed window
+    if(v.days===undefined){
+      v.days=parseOH(v.oh);v.src=v.days?"OSM":v.oh?"OSM (unparsed)":"Assumed";cnt[v.days?"osm":v.oh?"raw":"asm"]++;
+      if(!v.days){const c=toMins(scope==="national"?(LAST_CALL[v.st]||"02:00"):($("close").value||"02:00"));v.win=[open,c<=open?c+1440:c];v.days=Array(7).fill(v.win);}
+    }
+    return v.days;};
+  const slot=(t,days)=>{for(let d=Math.max(0,Math.floor(t/1440)-1);d<Math.floor(t/1440)+400;d++){const w=days[(dow0+d)%7];if(!w)continue;const a=Math.max(t,d*1440+w[0]);if(a+DWELL<=d*1440+w[1])return a;}return t;};
+
+  const rows=[],labels=[],series=[],info=[];
+  if(hasStart)rows.push(`<tr><td>0</td><td><b>${esc(startPt.label)}</b></td><td>Start</td><td>${clock(now)}</td><td class="safe"><b>0.000%</b></td><td></td><td></td><td></td></tr>`);
+
+  path.forEach((pub,k)=>{
+    if(hasStart&&k===0)return;
+    const prev=k>0?path[k-1]:null,notes=[];let mode="Start here";
+    if(prev){
+      const dist=D(prev,pub)*CIRC;miles+=dist;let tm;
+      if(dist<=1){tm=Math.round(dist/3*60);mode=`Walk, ${dist.toFixed(1)} mi`;}
+      else{
+        tm=Math.round(dist/(dist>25?55:30)*60);mode=`Rideshare or designated driver, ${Math.round(dist)} mi`;
+        const nb=Math.floor(tm/BREAK_EVERY);
+        if(nb>0){notes.push(`${nb}× ${BREAK_LEN} min driver break`);adv(now+tm,"travel");adv(now+nb*BREAK_LEN,"rest");tm=0;}
+      }
+      adv(now+tm,"travel");
+    }
+    const days=hoursOf(pub);
+    for(let g=0;g<50;g++){
+      const a=slot(now,days);
+      if(a>now){const w=a-now;if(w>360){nights++;notes.push(`overnight, ${dur(w)}`);}else notes.push(`wait for open, ${dur(w)}`);adv(a,"closed");}
+      if(cap>0&&bac+bump>cap+1e-9){
+        const rest=Math.ceil((bac+bump-cap)/ELIM*60/5)*5;
+        notes.push(`rest ${dur(rest)} to stay under ${cap.toFixed(2)}%`);adv(now+rest,"rest");continue;
+      }
+      break;
+    }
+    const arrive=now;bac+=bump;adv(now+DWELL,"dwell");stops++;
+    const cls=bac>=0.08?"danger":bac>=0.05?"warn":"safe";
+    const hrs=pub.src==="OSM"?pub.oh:fmtWin(pub.win)+(pub.oh?` (OSM: ${pub.oh})`:"");
+    rows.push(`<tr data-i="${stops-1}"><td>${stops}</td><td><b>${esc(pub.name)}</b></td><td>${mode}</td><td>${clock(arrive)}</td><td class="${cls}"><b>${bac.toFixed(3)}%</b></td><td>${esc(hrs)}</td><td>${pub.src}</td><td>${notes.join("; ")}</td></tr>`);
+    labels.push(String(stops));series.push(+bac.toFixed(4));
+    info.push({pub,arrive,bac,cls,hrs,src:pub.src});
+  });
+
+  const total=now-open,soberAt=now+bac/ELIM*60;
+  const kp=(v,l)=>`<div class="k"><b>${v}</b><span>${l}</span></div>`;
+  $("kpis").innerHTML=kp(dur(total),"Total time, start to last stop")+kp(clock(now),"Finish")+kp(stops.toLocaleString(),"Stops")+kp(Math.round(miles).toLocaleString()+" mi","Distance incl. start leg")
+    +kp(dur(tot.travel),"Travelling")+kp(dur(tot.dwell),"At venues")+kp(dur(tot.rest),"Rest breaks")+kp(dur(tot.closed),`Closed / overnight (${nights} night${nights===1?"":"s"})`);
+  $("sub").textContent=`Back to 0.000% around ${clock(soberAt)}. ${capNote}`;
+  ROWS=rows;showRows(300);
+  $("status").textContent+=` Hours: ${cnt.osm.toLocaleString()} from OSM, ${cnt.raw.toLocaleString()} OSM text not parsed (assumed window used), ${cnt.asm.toLocaleString()} assumed.`;
+  drawMap(path,info,hasStart);
+
+  if(chart)chart.destroy();
+  const st=Math.ceil(series.length/2000),sv=series.filter((_,i)=>i%st===0),lb=labels.filter((_,i)=>i%st===0);
+  const flat=v=>lb.map(()=>v);
+  chart=new Chart($("chart"),{type:"line",
+    data:{labels:lb,datasets:[
+      {label:"BAC % after drink",data:sv,borderColor:"#2dd4bf",backgroundColor:"#2dd4bf",tension:.2,pointRadius:lb.length>100?0:3,borderWidth:1.5},
+      {label:"0.05",data:flat(0.05),borderColor:"#f59e0b",borderDash:[5,4],pointRadius:0},
+      {label:"0.08",data:flat(0.08),borderColor:"#f87171",borderDash:[5,4],pointRadius:0}]},
+    options:{responsive:true,maintainAspectRatio:false,animation:false,
+      scales:{x:{title:{display:true,text:"Stop",color:"#8b9bb8"},ticks:{color:"#8b9bb8",maxTicksLimit:12},grid:{color:"#22304d"}},
+              y:{beginAtZero:true,ticks:{color:"#8b9bb8"},grid:{color:"#22304d"}}},
+      plugins:{legend:{labels:{color:"#e2e8f0"}}}}});
+}
+
+const COLORS={safe:"#2dd4bf",warn:"#f59e0b",danger:"#f87171"};
+function drawMap(path,info,hasStart){
+  layer.clearLayers();markers=[];INFO=info;
+  const canvas=L.canvas({padding:.5});
+  const pts=path.map(p=>[p.lat,p.lon]);
+  L.polyline(pts,{color:"#2dd4bf",weight:1.5,opacity:.55,renderer:canvas}).addTo(layer);
+  const skip=Math.ceil(info.length/4000);
+  info.forEach((s,i)=>{
+    if(i%skip)return;
+    const m=L.circleMarker([s.pub.lat,s.pub.lon],{radius:5,color:"#0b1220",weight:1,fillColor:COLORS[s.cls],fillOpacity:.95,renderer:canvas})
+      .bindTooltip(`${i+1}. ${esc(s.pub.name)}<br>${clock(s.arrive)} · ${s.bac.toFixed(3)}%<br>Hours: ${esc(s.hrs)} (${s.src})`).addTo(layer);
+    markers[i]=m;
+  });
+  if(hasStart)L.circleMarker(pts[0],{radius:9,color:"#fff",weight:2,fillColor:"#6366f1",fillOpacity:1,renderer:canvas}).bindTooltip("Start").addTo(layer);
+  map.fitBounds(L.latLngBounds(pts).pad(.1));
+}
+$("log").addEventListener("click",e=>{
+  const tr=e.target.closest("tr[data-i]");if(!tr)return;
+  const i=+tr.dataset.i,m=markers[i],s=INFO[i];
+  map.setView(m?m.getLatLng():[s.pub.lat,s.pub.lon],Math.max(map.getZoom(),15));if(m)m.openTooltip();
+  $("map").scrollIntoView({behavior:"smooth",block:"center"});
+});
+function showRows(n){shown=Math.min(ROWS.length,n);$("log").innerHTML=ROWS.slice(0,shown).join("");
+  $("more").classList.toggle("hide",shown>=ROWS.length);$("more").textContent=`Show more rows (${shown.toLocaleString()} of ${ROWS.length.toLocaleString()})`;}
+$("more").onclick=()=>showRows(shown+500);
+$("run").onclick=run;
+</script>
+</body>
+</html>
