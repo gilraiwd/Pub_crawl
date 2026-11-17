@@ -1,1 +1,23 @@
-
+# Save as .github/workflows/build-data.yml in your repo.
+name: Build bar data
+on:
+  schedule:
+    - cron: "0 6 * * 0"   # weekly, Sunday 06:00 UTC
+  workflow_dispatch:       # also lets you run it by hand from the Actions tab
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node build-data.mjs
+      - run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data
+          git diff --cached --quiet || (git commit -m "Refresh bar data" && git push)
