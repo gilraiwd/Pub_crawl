@@ -64,10 +64,11 @@ td:last-child{white-space:normal;min-width:180px;color:var(--mute)}tbody tr[data
   <label>Day starts<input id="start" type="time" value="16:00"></label>
   <label>Default last call<input id="close" type="time" value="02:00"></label>
   <label>Pause to stay under BAC<input id="cap" type="number" value="0.08" min="0" step="0.01" style="width:90px"></label>
+  <label>Max BAC to start a drive<input id="dlim" type="number" value="0.08" min="0" step="0.01" style="width:90px"></label>
   <button id="run" class="pri" type="button">Plan route</button>
  </div>
  <div id="status"></div>
- <div class="fine">Venues come from OpenStreetMap (amenity = bar or pub): live for the radius mode, or from the prebuilt data/ files for state and nationwide. If more are found than Max venues, the ones nearest your start are kept. Hours come from each venue's OSM opening_hours when they can be parsed; otherwise the default window and last call are assumed, and the Source column says which. The plan visits all of them: it waits overnight when venues are closed, and rests when the next drink would pass your BAC limit (0 turns the limit off). Rides over 2 hours add a 20-minute driver break per 2 hours.</div>
+ <div class="fine">Venues come from OpenStreetMap (amenity = bar or pub): live for the radius mode, or from the prebuilt data/ files for state and nationwide. If more are found than Max venues, the ones nearest your start are kept. Hours come from each venue's OSM opening_hours when they can be parsed; otherwise the default window and last call are assumed, and the Source column says which. The plan visits all of them: it waits overnight when venues are closed, and rests when the next drink would pass your BAC limit (0 turns the limit off). Hops over 1 mile are driven; drives over 2 hours add a 20-minute break per 2 hours.</div>
 </div>
 
 <div class="p"><div id="map"></div></div>
@@ -84,7 +85,7 @@ td:last-child{white-space:normal;min-width:180px;color:var(--mute)}tbody tr[data
  <button id="more" class="hide" type="button" style="margin-top:8px">Show more rows</button>
 </div>
 <div class="p"><div class="cv"><canvas id="chart"></canvas></div></div>
-<p class="fine">Widmark estimates only. Real BAC varies with food, hydration, body composition and drink strength, so never use this to decide whether you can drive. Rides over 1 mile are modeled as rideshare or designated driver, never self-driving. Distances are straight-line × 1.2 as a road estimate. Map data © OpenStreetMap contributors; geocoding by Nominatim, venues via Overpass. OSM coverage is good but not complete.</p>
+<p class="fine">Widmark estimates only. Real BAC varies with food, hydration, body composition and drink strength, so never use this to decide whether you can drive. Hops over 1 mile are modeled as driving (about 30 mph in town, 55 mph on highways). Distances are straight-line × 1.2 as a road estimate. Map data © OpenStreetMap contributors; geocoding by Nominatim, venues via Overpass. OSM coverage is good but not complete.</p>
 </main>
 
 <script>
@@ -284,7 +285,7 @@ function simulate(pubs){
   const capNote=cap>0&&cap<bump?`Limit ${cap} is below a single drink (${bump.toFixed(3)}%), so it was ignored.`:"";
   if(capNote)cap=0;
 
-  const hasStart=!!startPt;
+  const hasStart=!!startPt,dlim=parseFloat($("dlim").value)||0;
   const path=order(pubs,hasStart?{name:startPt.label,lat:startPt.lat,lon:startPt.lon}:null);
   let now=open,bac=0,miles=0,stops=0,nights=0;
   const tot={travel:0,dwell:0,rest:0,closed:0};
@@ -308,7 +309,9 @@ function simulate(pubs){
       const dist=D(prev,pub)*CIRC;miles+=dist;let tm;
       if(dist<=1){tm=Math.round(dist/3*60);mode=`Walk, ${dist.toFixed(1)} mi`;}
       else{
-        tm=Math.round(dist/(dist>25?55:30)*60);mode=`Rideshare or designated driver, ${Math.round(dist)} mi`;
+        tm=Math.round(dist/(dist>25?55:30)*60);mode=`Driving, ${Math.round(dist)} mi`;
+        if(dlim>0){const tg=dlim-0.001;if(bac>tg){const rs=Math.ceil((bac-tg)/ELIM*60/5)*5;notes.push(`rest ${dur(rs)} to get under ${dlim.toFixed(2)}% before driving`);adv(now+rs,"rest");}}
+        else if(bac>=0.05)notes.push(`⚠ driving at ${bac.toFixed(3)}%`);
         const nb=Math.floor(tm/BREAK_EVERY);
         if(nb>0){notes.push(`${nb}× ${BREAK_LEN} min driver break`);adv(now+tm,"travel");adv(now+nb*BREAK_LEN,"rest");tm=0;}
       }
