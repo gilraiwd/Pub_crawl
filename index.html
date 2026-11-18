@@ -75,7 +75,7 @@ td:last-child{white-space:normal;min-width:180px;color:var(--mute)}tbody tr[data
   <div class="fine">Leave blank to use the free public server, which is rate limited. Your own OSRM servers have no limit. Use https:// URLs.</div>
  </details>
  <div id="status"></div>
- <div class="fine">Venues come from OpenStreetMap. Rules enforced: (1) 1.0-mile walking limit bar-to-bar; (2) Unlimited walk-back distance to parked car when over the drive limit; (3) Map lines are fully bound to actual street and footpath geometries via OSRM.</div>
+ <div class="fine">Venues come from OpenStreetMap. Routing engine fixed: local hops within 1.0 mile are forced to walk so you can bar-hop continuously while over the limit; longer jumps correctly require returning to your parked car.</div>
 </div>
 
 <div class="p"><div id="map"></div></div>
@@ -249,13 +249,12 @@ async function getVenues(){
   return {list,found:list.length,built};
 }
 
-const DEFAULT_PUB={car:"https://router.openstreetmap.de/routed-car",walk:"https://router.openstreetmap.de/routed-foot"};
+const DEFAULT_PUB={car:"https://routing.openstreetmap.de/routed-car",walk:"https://routing.openstreetmap.de/routed-foot"};
 const own=m=>($(m==="walk"?"rfoot":"rcar").value||"").trim();
 const routerUrl=m=>(own(m)||DEFAULT_PUB[m]).replace(/\/+$/,"")+"/route/v1/";
 
 const rcache=new Map(),sleep=ms=>new Promise(r=>setTimeout(r,ms));let lastReq=0;
 
-// FIXED OSRM ROUTING GEOMETRY FETCHER
 async function fetchLegGeometry(mode, p1, p2){
   const profile = mode === 'walk' ? 'foot' : 'driving';
   for(let a=0;a<3;a++){
@@ -314,6 +313,7 @@ async function planRoute(pubs, startPt, openTime) {
       const pub = unvisited[i];
       let travelDist = currentPos ? D(currentPos, pub) * CIRC : 0;
       
+      // Enforce strict 1.0 mile walking threshold during planning
       let mode = (travelDist <= 1.0) ? 'walk' : 'car';
       if (!currentPos) mode = 'car';
 
@@ -379,6 +379,8 @@ async function simulateAndDraw(itinerary, startPt, openTime){
   const tot = {travel: 0, dwell: 0, rest: 0, closed: 0};
   const rows = [], labels = [], series = [], info = [];
 
+  const initialCarPos = startPt ? {lat: startPt.lat, lon: startPt.lon, name: startPt.label} : null;
+
   if (startPt) {
     rows.push(`<tr><td>0</td><td><b>${esc(startPt.label)}</b> (Car Parked)</td><td>Start</td><td>${clock(now)}</td><td class="safe"><b>0.000%</b></td><td></td><td></td><td></td></tr>`);
   }
@@ -412,9 +414,10 @@ async function simulateAndDraw(itinerary, startPt, openTime){
         currentPos = {lat: pub.lat, lon: pub.lon};
       } else {
         // DRIVING LEG & BAC OVER LIMIT CHECK:
-        // If BAC >= dlim, walk back to parked car instead of driving!
+        // If BAC >= dlim, you cannot drive! You must walk back to your ORIGINAL parked car (initialCarPos or parkedCarPos).
         if (dlim > 0 && bac >= dlim) {
-          let walkBackDist = currentPos && parkedCarPos ? D(currentPos, parkedCarPos) * CIRC : 0;
+          let walkBackTarget = parkedCarPos || initialCarPos;
+          let walkBackDist = currentPos && walkBackTarget ? D(currentPos, walkBackTarget) * CIRC : 0;
           let walkBackMins = walkBackDist > 0.05 ? (walkBackDist / 3.0) * 60 : 0;
           
           if (walkBackMins > 0) {
@@ -424,15 +427,17 @@ async function simulateAndDraw(itinerary, startPt, openTime){
             tot.travel += walkBackMins;
             miles += walkBackDist;
             
-            legStartPos = {...parkedCarPos};
-            actualMode = 'walk';
-            dist = walkBackDist;
-            travelMins = walkBackMins;
-            modeStr = `Walk back to car, ${walkBackDist.toFixed(1)} mi`;
-            currentPos = {lat: pub.lat, lon: pub.lon};
+            legStartPos = {...currentPos};
+            const streetGeoBack = await fetchLegGeometry('walk', legStartPos, walkBackTarget);
+            allGeoPoints.push(streetGeoBack);
+
+            currentPos = {...walkBackTarget};
+            parkedCarPos = {...walkBackTarget};
+            legStartPos = {...currentPos};
           }
 
-          if (bac >= dlim && actualMode === 'car') {
+          // If still at the car and BAC >= dlim, rest until sober:
+          if (bac >= dlim) {
             const driveRest = Math.ceil((bac - dlim + 0.0001) / ELIM * 60 / 5) * 5;
             notes.push(`rest ${dur(driveRest)} to reach drive limit < ${dlim.toFixed(2)}% before driving`);
             now += driveRest;
@@ -441,15 +446,14 @@ async function simulateAndDraw(itinerary, startPt, openTime){
           }
         }
 
-        if (actualMode === 'car') {
-          parkedCarPos = {lat: parkedCarPos ? parkedCarPos.lat : pub.lat, lon: parkedCarPos ? parkedCarPos.lon : pub.lon};
-          let driveDist = parkedCarPos ? D(parkedCarPos, pub) * CIRC : dist;
-          travelMins = (driveDist / 30.0) * 60;
-          dist = driveDist;
-          modeStr = `Drive, ${dist.toFixed(1)} mi`;
-          parkedCarPos = {lat: pub.lat, lon: pub.lon};
-          currentPos = {lat: pub.lat, lon: pub.lon};
-        }
+        // Now safe to drive to the next venue
+        parkedCarPos = {lat: parkedCarPos ? parkedCarPos.lat : pub.lat, lon: parkedCarPos ? parkedCarPos.lon : pub.lon};
+        let driveDist = parkedCarPos ? D(parkedCarPos, pub) * CIRC : dist;
+        travelMins = (driveDist / 30.0) * 60;
+        dist = driveDist;
+        modeStr = `Drive, ${dist.toFixed(1)} mi`;
+        parkedCarPos = {lat: pub.lat, lon: pub.lon};
+        currentPos = {lat: pub.lat, lon: pub.lon};
       }
     }
 
@@ -505,7 +509,7 @@ async function simulateAndDraw(itinerary, startPt, openTime){
     + kp(dur(tot.travel), "Travelling") + kp(dur(tot.dwell), "At venues") + kp(tot.rest > 0 ? dur(tot.rest) : "0m", "Rest") + kp(dur(tot.closed), `Closed/wait (${nights} night${nights === 1 ? "" : "s"})`);
   $("sub").textContent = `Back to 0.000% around ${clock(soberAt)}.`;
   ROWS = rows; showRows(300);
-  $("status").textContent = `Route planned successfully across ${stops} stops with street-level routing and enforced safety limits!`;
+  $("status").textContent = `Route planned successfully across ${stops} stops with 1.0mi walking limit and correct car-return routing!`;
   
   drawMap(allGeoPoints, itinerary.map(i => i.to), info, !!startPt);
 
@@ -535,11 +539,11 @@ function drawMap(geoSegments, path, info, hasStart){
   layer.clearLayers(); markers=[]; INFO=info;
   const canvas=L.canvas({padding:.5});
   
-  // Render every street/footpath segment correctly
   geoSegments.forEach(seg => {
     L.polyline(seg, {color:"#2dd4bf", weight:2.5, opacity:0.75, renderer:canvas}).addTo(layer);
   });
 
+  info.files = [];
   info.forEach((s,i)=>{
     const m=L.circleMarker([s.pub.lat,s.pub.lon],{radius:5,color:"#0b1220",weight:1,fillColor:COLORS[s.cls],fillOpacity:.95,renderer:canvas})
       .bindTooltip(`${i+1}. ${esc(s.pub.name)}<br>${clock(s.arrive)} · ${s.bac.toFixed(3)}%<br>Hours: ${esc(s.hrs)} (${s.src})`).addTo(layer);
