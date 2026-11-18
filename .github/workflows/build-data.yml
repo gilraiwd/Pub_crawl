@@ -2,22 +2,26 @@
 name: Build bar data
 on:
   schedule:
-    - cron: "0 6 * * 0"   # weekly, Sunday 06:00 UTC
-  workflow_dispatch:       # also lets you run it by hand from the Actions tab
+    - cron: "0 6 * * 0"   # weekly, Sunday 06:00 UTC[cite: 5]
+  workflow_dispatch:       # also lets you run it by hand from the Actions tab[cite: 5]
 permissions:
-  contents: write
+  contents: write[cite: 5]
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 300
+    runs-on: ubuntu-latest[cite: 5]
+    timeout-minutes: 300[cite: 5]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v4[cite: 5]
+      - uses: actions/setup-node@v4[cite: 5]
         with:
-          node-version: 20
-      - run: node build-data.mjs
+          node-version: 20[cite: 5]
+      - run: node build-data.mjs[cite: 5]
       - run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add data
-          git diff --cached --quiet || (git commit -m "Refresh bar data" && git push)
+          git config user.name "github-actions"[cite: 5]
+          git config user.email "actions@github.com"[cite: 5]
+          git add data[cite: 5]
+          if ! git diff --cached --quiet; then
+            git commit -m "Refresh bar data"[cite: 5]
+            git pull --rebase origin main
+            git push
+          fi
