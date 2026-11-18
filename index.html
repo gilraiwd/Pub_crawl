@@ -53,17 +53,17 @@ td:last-child{white-space:normal;min-width:180px;color:var(--mute)}tbody tr[data
     <option value="state">One state (prebuilt data)</option>
     <option value="national">Nationwide (prebuilt data)</option>
   </select></label>
-  <label id="wRadius">Radius (mi)<select id="radius"><option>1</option><option>2</option><option selected>5</option><option>10</option><option>25</option></select></label>
+  <label id="wRadius">Radius (mi)<select id="radius"><option>1</option><option>2</option><option>5</option><option selected>10</option><option>25</option></select></label>
   <label id="wState" class="hide">State<select id="state"><option value="">Loading states...</option></select></label>
   <label>Max venues<input id="maxn" type="number" value="1000" min="2" max="250000" step="1000" style="width:90px"></label>
   <label>Start date<input id="sdate" type="date"></label>
   <label>Sex<select id="gender"><option>Male</option><option>Female</option></select></label>
-  <label>Weight (lbs)<input id="weight" type="number" value="180" min="60" max="500" style="width:80px"></label>
+  <label>Weight (lbs)<input id="weight" type="number" value="220" min="60" max="500" style="width:80px"></label>
   <label>Grams per drink<input id="grams" type="number" value="14" min="1" step="0.5" style="width:80px"></label>
   <label>Drinks per stop<input id="dps" type="number" value="1" min="0.5" step="0.5" style="width:80px"></label>
-  <label>Day starts<input id="start" type="time" value="16:00"></label>
+  <label>Day starts<input id="start" type="time" value="06:00"></label>
   <label>Default last call<input id="close" type="time" value="02:00"></label>
-  <label>Pause to stay under BAC<input id="cap" type="number" value="0.08" min="0" step="0.01" style="width:90px"></label>
+  <label>Pause to stay under BAC<input id="cap" type="number" value="0.30" min="0" step="0.01" style="width:90px"></label>
   <label>Max BAC to start a drive<input id="dlim" type="number" value="0.08" min="0" step="0.01" style="width:90px"></label>
   <button id="run" class="pri" type="button">Plan route</button>
  </div>
@@ -75,7 +75,7 @@ td:last-child{white-space:normal;min-width:180px;color:var(--mute)}tbody tr[data
   <div class="fine">Leave blank to use the free public server, which is rate limited. Your own OSRM servers have no limit. Use https:// URLs.</div>
  </details>
  <div id="status"></div>
- <div class="fine">Venues come from OpenStreetMap. Routing engine fixed: local hops within 1.0 mile are forced to walk so you can bar-hop continuously while over the limit; longer jumps correctly require returning to your parked car.</div>
+ <div class="fine">Venues come from OpenStreetMap. Rules enforced: (1) Bar-to-bar walking limit is strictly 1.0 mile; (2) When over the driving BAC limit, nearby walkable venues are prioritized before walking back to your parked car and resting below the drive limit; (3) Operating hours are checked dynamically at actual arrival time (note: BAC shown is post-drink).</div>
 </div>
 
 <div class="p"><div id="map"></div></div>
@@ -85,7 +85,7 @@ td:last-child{white-space:normal;min-width:180px;color:var(--mute)}tbody tr[data
  <div id="sub">Pick a venue source and select Plan route.</div>
  <div class="tw">
   <table>
-   <thead><tr><th>Stop</th><th>Venue</th><th>Getting there</th><th>Arrive</th><th>BAC</th><th>Hours</th><th>Source</th><th>Rest / wait</th></tr></thead>
+   <thead><tr><th>Stop</th><th>Venue</th><th>Getting there</th><th>Arrive</th><th>BAC (post-drink)</th><th>Hours</th><th>Source</th><th>Rest / wait</th></tr></thead>
    <tbody id="log"><tr><td colspan="8" style="text-align:center;color:var(--mute)">No route yet</td></tr></tbody>
   </table>
  </div>
@@ -96,7 +96,7 @@ td:last-child{white-space:normal;min-width:180px;color:var(--mute)}tbody tr[data
 </main>
 
 <script>
-const DWELL=15,ELIM=0.015,CIRC=1.2,BREAK_EVERY=120,BREAK_LEN=20;
+const DWELL=15,ELIM=0.015,CIRC=1.2;
 
 const $=id=>document.getElementById(id);
 const D=(a,b)=>{const R=3958.8,t=Math.PI/180,dl=(b.lat-a.lat)*t,dn=(b.lon-a.lon)*t;
@@ -196,13 +196,16 @@ async function overpass(q){
 
 const DN=["Su","Mo","Tu","We","Th","Fr","Sa"],hm=s=>{const[h,m]=s.split(":");return +h*60+ +m;};
 const hhmm=m=>String(Math.floor(m/60)%24).padStart(2,"0")+":"+String(m%60).padStart(2,"0"),fmtWin=w=>hhmm(w[0])+"–"+hhmm(w[1]);
+
 function parseOH(s){
   s=(s||"").trim().replace(/;\s*$/,"");if(!s)return null;
-  if(s==="24/7")return Array(7).fill([0,1440]);
+  if(s==="24/7")return Array(7).fill([[0,1440]]);
+  if(/^(off|closed)$/i.test(s))return Array(7).fill([]);
   const d1="(?:Mo|Tu|We|Th|Fr|Sa|Su)",part=d1+"(?:\\s*-\\s*"+d1+")?";
-  const re=new RegExp("^(?:("+part+"(?:\\s*,\\s*"+part+")*)\\s+)?(?:(off|closed)|(\\d{1,2}:\\d\\d)\\s*-\\s*(\\d{1,2}:\\d\\d))$","i");
-  const days=Array(7).fill(null);let any=false;
-  for(const rule of s.split(";")){
+  const tSpan="(\\d{1,2}:\\d\\d)(?:\\s*-\\s*(\\d{1,2}:\\d\\d)|\\+)";
+  const re=new RegExp("^(?:("+part+"(?:\\s*,\\s*"+part+")*)\\s+)?(?:(off|closed)|("+tSpan+"(?:\\s*,\\s*"+tSpan+")*))$","i");
+  const days=Array.from({length:7},()=>null);let any=false;
+  for(const rule of s.split(/;|,\s*(?=(?:Mo|Tu|We|Th|Fr|Sa|Su)\b)/i)){
     const m=rule.trim().match(re);if(!m)return null;
     const set=new Set();
     if(!m[1])for(let i=0;i<7;i++)set.add(i);
@@ -210,8 +213,21 @@ function parseOH(s){
       const [a,b=a]=pt.split("-").map(x=>{x=x.trim();return DN.indexOf(x[0].toUpperCase()+x[1].toLowerCase());});
       for(let i=a;;i=(i+1)%7){set.add(i);if(i===b)break;}
     }
-    const w=m[2]?null:[hm(m[3]),hm(m[4])];if(w&&w[1]<=w[0])w[1]+=1440;
-    set.forEach(i=>days[i]=w);any=true;
+    if(m[2]){
+      set.forEach(i=>days[i]=[]);
+    }else{
+      const wins=[];
+      for(const seg of m[3].split(",")){
+        const sm=seg.trim().match(/^(\d{1,2}:\d\d)(?:\s*-\s*(\d{1,2}:\d\d)|\+)$/);
+        if(!sm)return null;
+        const startM=hm(sm[1]);
+        let endM=sm[2]?hm(sm[2]):toMins($("close").value||"02:00");
+        if(endM<=startM)endM+=1440;
+        wins.push([startM,endM]);
+      }
+      set.forEach(i=>days[i]=wins);
+    }
+    any=true;
   }
   return any?days:null;
 }
@@ -255,94 +271,190 @@ const routerUrl=m=>(own(m)||DEFAULT_PUB[m]).replace(/\/+$/,"")+"/route/v1/";
 
 const rcache=new Map(),sleep=ms=>new Promise(r=>setTimeout(r,ms));let lastReq=0;
 
-async function fetchLegGeometry(mode, p1, p2){
+async function fetchLeg(mode, p1, p2){
   const profile = mode === 'walk' ? 'foot' : 'driving';
+  const key = `${profile}|${p1.lat.toFixed(5)},${p1.lon.toFixed(5)}|${p2.lat.toFixed(5)},${p2.lon.toFixed(5)}`;
+  if(rcache.has(key)) return rcache.get(key);
   for(let a=0;a<3;a++){
-    const w = lastReq + 200 - Date.now(); if(w > 0) await sleep(w); lastReq = Date.now();
+    const w = lastReq + (own(mode)?40:250) - Date.now(); if(w > 0) await sleep(w); lastReq = Date.now();
     try{
       const url = `${routerUrl(profile)}${p1.lon},${p1.lat};${p2.lon},${p2.lat}?overview=full&geometries=geojson`;
       const res = await fetch(url);
+      if(res.status===429||res.status>=500){await sleep(1500*(a+1));continue;}
       if(!res.ok) continue;
       const j = await res.json();
       if(j.code === "Ok" && j.routes && j.routes.length > 0){
-        return j.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
+        const r = j.routes[0];
+        const out = {
+          coords: r.geometry.coordinates.map(c => [c[1], c[0]]),
+          mi: r.distance / 1609.34,
+          min: r.duration / 60,
+          routed: true
+        };
+        rcache.set(key, out);
+        return out;
       }
     }catch(e){}
   }
-  return [[p1.lat, p1.lon], [p2.lat, p2.lon]];
+  const d = D(p1, p2) * CIRC;
+  const fallback = {
+    coords: [[p1.lat, p1.lon], [p2.lat, p2.lon]],
+    mi: d,
+    min: mode === 'walk' ? (d / 3.0) * 60 : (d / 30.0) * 60,
+    routed: false
+  };
+  rcache.set(key, fallback);
+  return fallback;
+}
+
+// Helper to find the exact timestamp >= t when a venue is open for at least DWELL minutes
+function getNextOpenTime(pub, t, dow0) {
+  const startDay = Math.max(0, Math.floor(t / 1440) - 1);
+  for (let d = startDay; d < startDay + 14; d++) {
+    const wins = pub.days[(dow0 + d) % 7];
+    if (!wins || !wins.length) continue;
+    for (const w of wins) {
+      const openAbs = d * 1440 + w[0];
+      const closeAbs = d * 1440 + w[1];
+      const arr = Math.max(t, openAbs);
+      if (arr + DWELL <= closeAbs) return arr;
+    }
+  }
+  return null; // Permanently closed (e.g., "closed" tag)
 }
 
 async function planRoute(pubs, startPt, openTime) {
   const dow0 = new Date(($("sdate").value || new Date().toLocaleDateString("en-CA")) + "T12:00").getDay();
   const defaultClose = toMins($("close").value || "02:00");
-  
+  const weightKg = (parseFloat($("weight").value) || 220) * 0.453592;
+  const r = $("gender").value === "Male" ? 0.68 : 0.55;
+  const bump = (parseFloat($("grams").value) || 14) * (parseFloat($("dps").value) || 1) / (weightKg * 1000 * r) * 100;
+  const dlim = parseFloat($("dlim").value) || 0;
+  const cap = parseFloat($("cap").value) || 0;
+
+  const validPubs = [];
   pubs.forEach((pub, idx) => {
     pub.id = idx;
     let days = parseOH(pub.oh);
     pub.src = days ? "OSM" : pub.oh ? "OSM (unparsed)" : "Assumed";
     if (!days) {
       const c = defaultClose;
-      const win = [openTime, c <= openTime ? c + 1440 : c];
+      const win = [[openTime, c <= openTime ? c + 1440 : c]];
       days = Array(7).fill(win);
     }
     pub.days = days;
+    if (getNextOpenTime(pub, openTime, dow0) !== null) {
+      validPubs.push(pub);
+    }
   });
 
-  let unvisited = [...pubs];
+  let unvisited = [...validPubs];
   let visited = [];
-  let currentTime = openTime;
-  let currentPos = startPt ? {lat: startPt.lat, lon: startPt.lon, name: startPt.label} : null;
-
-  const getNextOpenTime = (pub, t) => {
-    for (let d = Math.max(0, Math.floor(t / 1440) - 1); d < Math.floor(t / 1440) + 400; d++) {
-      const w = pub.days[(dow0 + d) % 7];
-      if (!w) continue;
-      const a = Math.max(t, d * 1440 + w[0]);
-      if (a + DWELL <= d * 1440 + w[1]) return a;
-    }
-    return t;
-  };
+  let simTime = openTime;
+  let simBac = 0;
+  let simPos = startPt ? {lat: startPt.lat, lon: startPt.lon} : null;
+  let simCarPos = startPt ? {lat: startPt.lat, lon: startPt.lon} : null;
 
   while (unvisited.length > 0) {
     let bestIdx = -1;
     let bestScore = Infinity;
-    let bestArrival = 0;
-    let bestMode = 'car';
 
     for (let i = 0; i < unvisited.length; i++) {
       const pub = unvisited[i];
-      let travelDist = currentPos ? D(currentPos, pub) * CIRC : 0;
-      
-      // Enforce strict 1.0 mile walking threshold during planning
-      let mode = (travelDist <= 1.0) ? 'walk' : 'car';
-      if (!currentPos) mode = 'car';
+      let t = simTime;
+      let b = simBac;
+      let dist = simPos ? D(simPos, pub) * CIRC : 0;
+      let isWalk = simPos && dist <= 1.0;
 
-      let travelMins = mode === 'walk' ? (travelDist / 3.0) * 60 : (travelDist / 30.0) * 60;
-      let arrival = currentTime + travelMins;
-      let openAt = getNextOpenTime(pub, arrival);
-      let waitTime = openAt - arrival;
+      if (!simPos) {
+        // First bar when no startPt: drive straight there
+        dist = 0;
+      } else if (isWalk) {
+        const walkMins = (dist / 3.0) * 60;
+        t += walkMins;
+        b = Math.max(0, b - ELIM * walkMins / 60);
+      } else {
+        // Driving leg: walk back to car first if away from car
+        const walkBackDist = simCarPos ? D(simPos, simCarPos) * CIRC : 0;
+        if (walkBackDist > 0.05) {
+          const wbMins = (walkBackDist / 3.0) * 60;
+          t += wbMins;
+          b = Math.max(0, b - ELIM * wbMins / 60);
+        }
+        // Must rest under dlim before driving
+        if (dlim > 0 && b >= dlim - 1e-9) {
+          const dRest = Math.ceil((b - (dlim - 0.001)) / ELIM * 60 / 5) * 5;
+          t += dRest;
+          b = Math.max(0, b - ELIM * dRest / 60);
+        }
+        const driveDist = simCarPos ? D(simCarPos, pub) * CIRC : dist;
+        const driveMins = (driveDist / 30.0) * 60;
+        t += driveMins;
+        b = Math.max(0, b - ELIM * driveMins / 60);
+      }
 
-      let score = waitTime * 2 + travelMins;
-      if (score < bestScore) {
-        bestScore = score;
+      const openAt = getNextOpenTime(pub, t, dow0);
+      const waitMins = openAt - t;
+      t = openAt;
+      b = Math.max(0, b - ELIM * waitMins / 60);
+
+      if (cap > 0 && b + bump > cap + 1e-9) {
+        const cRest = Math.ceil((b + bump - cap) / ELIM * 60 / 5) * 5;
+        t += cRest;
+      }
+
+      // Total elapsed time to complete this stop (heavily favors currently open venues & walkable clusters)
+      const elapsed = t - simTime;
+      if (elapsed < bestScore) {
+        bestScore = elapsed;
         bestIdx = i;
-        bestArrival = openAt;
-        bestMode = mode;
       }
     }
 
     const nextPub = unvisited.splice(bestIdx, 1)[0];
-    
-    let legRecord = {
-      from: currentPos ? {...currentPos} : null,
-      to: nextPub,
-      mode: bestMode,
-      arriveTime: bestArrival
-    };
+    visited.push(nextPub);
 
-    visited.push(legRecord);
-    currentTime = bestArrival + DWELL;
-    currentPos = {lat: nextPub.lat, lon: nextPub.lon, name: nextPub.name};
+    // Advance state estimate for next iteration
+    let dist = simPos ? D(simPos, nextPub) * CIRC : 0;
+    let isWalk = simPos && dist <= 1.0;
+    if (!simPos) {
+      simPos = {lat: nextPub.lat, lon: nextPub.lon};
+      simCarPos = {lat: nextPub.lat, lon: nextPub.lon};
+    } else if (isWalk) {
+      const walkMins = (dist / 3.0) * 60;
+      simTime += walkMins;
+      simBac = Math.max(0, simBac - ELIM * walkMins / 60);
+      simPos = {lat: nextPub.lat, lon: nextPub.lon};
+    } else {
+      const walkBackDist = simCarPos ? D(simPos, simCarPos) * CIRC : 0;
+      if (walkBackDist > 0.05) {
+        const wbMins = (walkBackDist / 3.0) * 60;
+        simTime += wbMins;
+        simBac = Math.max(0, simBac - ELIM * wbMins / 60);
+      }
+      if (dlim > 0 && simBac >= dlim - 1e-9) {
+        const dRest = Math.ceil((simBac - (dlim - 0.001)) / ELIM * 60 / 5) * 5;
+        simTime += dRest;
+        simBac = Math.max(0, simBac - ELIM * dRest / 60);
+      }
+      const driveDist = simCarPos ? D(simCarPos, nextPub) * CIRC : dist;
+      const driveMins = (driveDist / 30.0) * 60;
+      simTime += driveMins;
+      simBac = Math.max(0, simBac - ELIM * driveMins / 60);
+      simPos = {lat: nextPub.lat, lon: nextPub.lon};
+      simCarPos = {lat: nextPub.lat, lon: nextPub.lon};
+    }
+    const openAt = getNextOpenTime(nextPub, simTime, dow0);
+    simBac = Math.max(0, simBac - ELIM * (openAt - simTime) / 60);
+    simTime = openAt;
+    if (cap > 0 && simBac + bump > cap + 1e-9) {
+      const cRest = Math.ceil((simBac + bump - cap) / ELIM * 60 / 5) * 5;
+      simTime += cRest;
+      simBac = Math.max(0, simBac - ELIM * cRest / 60);
+    }
+    simBac += bump;
+    simTime += DWELL;
+    simBac = Math.max(0, simBac - ELIM * DWELL / 60);
   }
 
   return visited;
@@ -360,16 +472,17 @@ async function run(){
     $("status").textContent=`Found ${found.toLocaleString()} venues; planning route across ${use.length.toLocaleString()} stops...`;
     await new Promise(r=>setTimeout(r,20));
     
-    const openTime = toMins($("start").value || "16:00");
-    const itinerary = await planRoute(use, startPt, openTime);
+    const openTime = toMins($("start").value || "06:00");
+    const orderedPubs = await planRoute(use, startPt, openTime);
     
-    await simulateAndDraw(itinerary, startPt, openTime);
+    await simulateAndDraw(orderedPubs, startPt, openTime);
   }catch(e){$("status").classList.add("err");$("status").textContent=e.message;}
   btn.disabled=false;
 }
 
-async function simulateAndDraw(itinerary, startPt, openTime){
-  const weightKg = (parseFloat($("weight").value) || 180) * 0.453592;
+async function simulateAndDraw(orderedPubs, startPt, openTime){
+  const dow0 = new Date(($("sdate").value || new Date().toLocaleDateString("en-CA")) + "T12:00").getDay();
+  const weightKg = (parseFloat($("weight").value) || 220) * 0.453592;
   const r = $("gender").value === "Male" ? 0.68 : 0.55;
   const bump = (parseFloat($("grams").value) || 14) * (parseFloat($("dps").value) || 1) / (weightKg * 1000 * r) * 100;
   const dlim = parseFloat($("dlim").value) || 0;
@@ -379,107 +492,88 @@ async function simulateAndDraw(itinerary, startPt, openTime){
   const tot = {travel: 0, dwell: 0, rest: 0, closed: 0};
   const rows = [], labels = [], series = [], info = [];
 
-  const initialCarPos = startPt ? {lat: startPt.lat, lon: startPt.lon, name: startPt.label} : null;
-
   if (startPt) {
     rows.push(`<tr><td>0</td><td><b>${esc(startPt.label)}</b> (Car Parked)</td><td>Start</td><td>${clock(now)}</td><td class="safe"><b>0.000%</b></td><td></td><td></td><td></td></tr>`);
   }
 
   let parkedCarPos = startPt ? {lat: startPt.lat, lon: startPt.lon} : null;
   let currentPos = startPt ? {lat: startPt.lat, lon: startPt.lon} : null;
-
   let allGeoPoints = [];
 
-  for(let idx=0; idx<itinerary.length; idx++){
-    const item = itinerary[idx];
-    const pub = item.to;
+  for(let idx = 0; idx < orderedPubs.length; idx++){
+    const pub = orderedPubs[idx];
     const notes = [];
     let modeStr = "";
-    let travelMins = 0;
-    let dist = currentPos ? D(currentPos, pub) * CIRC : 0;
-    let actualMode = dist <= 1.0 ? 'walk' : 'car';
-    if (idx === 0 && !startPt) actualMode = 'car';
 
-    let legStartPos = currentPos ? {...currentPos} : {lat: pub.lat, lon: pub.lon};
+    $("status").textContent = `Routing street geometry for stop ${idx+1} of ${orderedPubs.length}...`;
 
     if (idx === 0 && !startPt) {
       modeStr = "Drive to 1st pub & park";
       parkedCarPos = {lat: pub.lat, lon: pub.lon};
       currentPos = {lat: pub.lat, lon: pub.lon};
-      travelMins = (dist / 30.0) * 60;
     } else {
-      if (actualMode === 'walk') {
-        modeStr = `Walk, ${dist.toFixed(1)} mi`;
-        travelMins = (dist / 3.0) * 60;
+      const straightEst = D(currentPos, pub) * CIRC;
+      if (straightEst <= 1.0) {
+        const leg = await fetchLeg('walk', currentPos, pub);
+        allGeoPoints.push(leg.coords);
+        modeStr = `Walk, ${leg.mi.toFixed(1)} mi${leg.routed ? "" : " (est.)"}`;
+        now += leg.min;
+        tot.travel += leg.min;
+        miles += leg.mi;
+        bac = Math.max(0, bac - ELIM * leg.min / 60);
         currentPos = {lat: pub.lat, lon: pub.lon};
       } else {
-        // DRIVING LEG & BAC OVER LIMIT CHECK:
-        // If BAC >= dlim, you cannot drive! You must walk back to your ORIGINAL parked car (initialCarPos or parkedCarPos).
-        if (dlim > 0 && bac >= dlim) {
-          let walkBackTarget = parkedCarPos || initialCarPos;
-          let walkBackDist = currentPos && walkBackTarget ? D(currentPos, walkBackTarget) * CIRC : 0;
-          let walkBackMins = walkBackDist > 0.05 ? (walkBackDist / 3.0) * 60 : 0;
-          
-          if (walkBackMins > 0) {
-            notes.push(`walk back ${walkBackDist.toFixed(1)} mi to parked car`);
-            now += walkBackMins;
-            bac = Math.max(0, bac - ELIM * walkBackMins / 60);
-            tot.travel += walkBackMins;
-            miles += walkBackDist;
-            
-            legStartPos = {...currentPos};
-            const streetGeoBack = await fetchLegGeometry('walk', legStartPos, walkBackTarget);
-            allGeoPoints.push(streetGeoBack);
-
-            currentPos = {...walkBackTarget};
-            parkedCarPos = {...walkBackTarget};
-            legStartPos = {...currentPos};
-          }
-
-          // If still at the car and BAC >= dlim, rest until sober:
-          if (bac >= dlim) {
-            const driveRest = Math.ceil((bac - dlim + 0.0001) / ELIM * 60 / 5) * 5;
-            notes.push(`rest ${dur(driveRest)} to reach drive limit < ${dlim.toFixed(2)}% before driving`);
-            now += driveRest;
-            tot.rest += driveRest;
-            bac = Math.max(0, bac - ELIM * driveRest / 60);
-          }
+        // Must drive: first walk back to parked car if we walked away from it
+        const wbStraight = parkedCarPos ? D(currentPos, parkedCarPos) * CIRC : 0;
+        if (wbStraight > 0.05) {
+          const wbLeg = await fetchLeg('walk', currentPos, parkedCarPos);
+          allGeoPoints.push(wbLeg.coords);
+          notes.push(`walk back ${wbLeg.mi.toFixed(1)} mi to parked car`);
+          now += wbLeg.min;
+          tot.travel += wbLeg.min;
+          miles += wbLeg.mi;
+          bac = Math.max(0, bac - ELIM * wbLeg.min / 60);
+          currentPos = {...parkedCarPos};
         }
 
-        // Now safe to drive to the next venue
-        parkedCarPos = {lat: parkedCarPos ? parkedCarPos.lat : pub.lat, lon: parkedCarPos ? parkedCarPos.lon : pub.lon};
-        let driveDist = parkedCarPos ? D(parkedCarPos, pub) * CIRC : dist;
-        travelMins = (driveDist / 30.0) * 60;
-        dist = driveDist;
-        modeStr = `Drive, ${dist.toFixed(1)} mi`;
+        // Enforce max BAC to start a drive BEFORE driving
+        if (dlim > 0 && bac >= dlim - 1e-9) {
+          const targetBac = Math.max(0, dlim - 0.001);
+          const driveRest = Math.ceil((bac - targetBac) / ELIM * 60 / 5) * 5;
+          notes.push(`rest ${dur(driveRest)} to reach drive limit < ${dlim.toFixed(2)}% (was ${bac.toFixed(3)}%)`);
+          now += driveRest;
+          tot.rest += driveRest;
+          bac = Math.max(0, bac - ELIM * driveRest / 60);
+        }
+
+        const driveLeg = await fetchLeg('car', currentPos, pub);
+        allGeoPoints.push(driveLeg.coords);
+        modeStr = `Drive, ${driveLeg.mi.toFixed(1)} mi${driveLeg.routed ? "" : " (est.)"}`;
+        now += driveLeg.min;
+        tot.travel += driveLeg.min;
+        miles += driveLeg.mi;
+        bac = Math.max(0, bac - ELIM * driveLeg.min / 60);
         parkedCarPos = {lat: pub.lat, lon: pub.lon};
         currentPos = {lat: pub.lat, lon: pub.lon};
       }
     }
 
-    const streetGeo = await fetchLegGeometry(actualMode, legStartPos, pub);
-    allGeoPoints.push(streetGeo);
-
-    now += travelMins;
-    tot.travel += travelMins;
-    miles += dist;
-
-    const arriveIdeal = now;
-    if (arriveIdeal < item.arriveTime) {
-      const wait = item.arriveTime - arriveIdeal;
+    // Check operating hours at ACTUAL arrival time
+    const openAt = getNextOpenTime(pub, now, dow0);
+    if (openAt !== null && openAt > now) {
+      const wait = openAt - now;
       if (wait > 360) {
         nights++;
-        notes.push(`overnight wait, ${dur(wait)}`);
+        notes.push(`overnight wait for open, ${dur(wait)}`);
       } else {
         notes.push(`wait for open, ${dur(wait)}`);
       }
-      now = item.arriveTime;
+      now = openAt;
       tot.closed += wait;
+      bac = Math.max(0, bac - ELIM * wait / 60);
     }
 
-    bac = Math.max(0, bac - ELIM * (now - arriveIdeal + travelMins) / 60);
-
-    // PAUSE/CAP CHECK: Enforce drinking cap
+    // Check pause BAC cap before taking the drink
     if (cap > 0 && bac + bump > cap + 1e-9) {
       const rest = Math.ceil((bac + bump - cap) / ELIM * 60 / 5) * 5;
       notes.push(`rest ${dur(rest)} to stay under cap ${cap.toFixed(2)}%`);
@@ -492,10 +586,11 @@ async function simulateAndDraw(itinerary, startPt, openTime){
     bac += bump;
     now += DWELL;
     tot.dwell += DWELL;
+    bac = Math.max(0, bac - ELIM * DWELL / 60);
     stops++;
 
     const cls = bac >= 0.08 ? "danger" : bac >= 0.05 ? "warn" : "safe";
-    const hrs = pub.src === "OSM" ? pub.oh : fmtWin(pub.days[0]) + (pub.oh ? ` (OSM: ${pub.oh})` : "");
+    const hrs = pub.src === "OSM" ? pub.oh : (pub.days[0] && pub.days[0][0] ? fmtWin(pub.days[0][0]) : "") + (pub.oh ? ` (OSM: ${pub.oh})` : "");
 
     rows.push(`<tr data-i="${stops - 1}"><td>${stops}</td><td><b>${esc(pub.name)}</b></td><td>${modeStr}</td><td>${clock(arriveTime)}</td><td class="${cls}"><b>${bac.toFixed(3)}%</b></td><td>${esc(hrs)}</td><td>${pub.src}</td><td>${notes.join("; ")}</td></tr>`);
     labels.push(String(stops));
@@ -509,9 +604,9 @@ async function simulateAndDraw(itinerary, startPt, openTime){
     + kp(dur(tot.travel), "Travelling") + kp(dur(tot.dwell), "At venues") + kp(tot.rest > 0 ? dur(tot.rest) : "0m", "Rest") + kp(dur(tot.closed), `Closed/wait (${nights} night${nights === 1 ? "" : "s"})`);
   $("sub").textContent = `Back to 0.000% around ${clock(soberAt)}.`;
   ROWS = rows; showRows(300);
-  $("status").textContent = `Route planned successfully across ${stops} stops with 1.0mi walking limit and correct car-return routing!`;
+  $("status").textContent = `Route planned across ${stops} open stops with street routing, operating hours, and BAC limits enforced.`;
   
-  drawMap(allGeoPoints, itinerary.map(i => i.to), info, !!startPt);
+  drawMap(allGeoPoints, startPt, info);
 
   if (chart) chart.destroy();
   chart = new Chart($("chart"), {
@@ -519,9 +614,9 @@ async function simulateAndDraw(itinerary, startPt, openTime){
     data: {
       labels,
       datasets: [
-        {label: "BAC %", data: series, borderColor: "#2dd4bf", backgroundColor: "#2dd4bf", tension: .2, pointRadius: 3, borderWidth: 1.5},
-        {label: "0.05", data: labels.map(() => 0.05), borderColor: "#f59e0b", borderDash: [5, 4], pointRadius: 0},
-        {label: "0.08", data: labels.map(() => 0.08), borderColor: "#f87171", borderDash: [5, 4], pointRadius: 0}
+        {label: "BAC % (post-drink)", data: series, borderColor: "#2dd4bf", backgroundColor: "#2dd4bf", tension: .2, pointRadius: 3, borderWidth: 1.5},
+        {label: "0.08 Drive Limit", data: labels.map(() => dlim || 0.08), borderColor: "#f59e0b", borderDash: [5, 4], pointRadius: 0},
+        {label: "Pause Cap", data: labels.map(() => cap || 0.30), borderColor: "#f87171", borderDash: [5, 4], pointRadius: 0}
       ]
     },
     options: {
@@ -535,7 +630,7 @@ async function simulateAndDraw(itinerary, startPt, openTime){
 }
 
 const COLORS={safe:"#2dd4bf",warn:"#f59e0b",danger:"#f87171"};
-function drawMap(geoSegments, path, info, hasStart){
+function drawMap(geoSegments, startPt, info){
   layer.clearLayers(); markers=[]; INFO=info;
   const canvas=L.canvas({padding:.5});
   
@@ -543,15 +638,14 @@ function drawMap(geoSegments, path, info, hasStart){
     L.polyline(seg, {color:"#2dd4bf", weight:2.5, opacity:0.75, renderer:canvas}).addTo(layer);
   });
 
-  info.files = [];
   info.forEach((s,i)=>{
     const m=L.circleMarker([s.pub.lat,s.pub.lon],{radius:5,color:"#0b1220",weight:1,fillColor:COLORS[s.cls],fillOpacity:.95,renderer:canvas})
       .bindTooltip(`${i+1}. ${esc(s.pub.name)}<br>${clock(s.arrive)} · ${s.bac.toFixed(3)}%<br>Hours: ${esc(s.hrs)} (${s.src})`).addTo(layer);
     markers[i]=m;
   });
 
-  if(hasStart && path.length > 0) {
-    L.circleMarker([path[0].lat, path[0].lon],{radius:9,color:"#fff",weight:2,fillColor:"#6366f1",fillOpacity:1,renderer:canvas}).bindTooltip("Start/Car").addTo(layer);
+  if(startPt) {
+    L.circleMarker([startPt.lat, startPt.lon],{radius:9,color:"#fff",weight:2,fillColor:"#6366f1",fillOpacity:1,renderer:canvas}).bindTooltip("Start/Car").addTo(layer);
   }
   
   const allCoords = geoSegments.flat();
